@@ -196,7 +196,9 @@
       font-weight: 800;
       background: linear-gradient(135deg, var(--text), var(--muted));
       -webkit-background-clip: text;
+      background-clip: text;
       -webkit-text-fill-color: transparent;
+      color: transparent;
     }
     .stat-sub {
       font-size: 12px;
@@ -1136,6 +1138,20 @@
 
 <script>
 // ============================================================
+// CONFIG — Update contract address after deployment
+// ============================================================
+// Alamat smart contract lending di OP_NET Testnet
+// Ganti dengan alamat kontrak kamu setelah deploy
+// Panduan deploy: lihat README.md bagian "Smart Contract"
+const LENDING_CONTRACT = 'tb1pxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx';
+
+// RPC endpoint OP_NET Testnet
+const OPNET_RPC = 'https://testnet.opnet.org';
+
+// Explorer untuk cek transaksi
+const EXPLORER_URL = 'https://explorer.opnet.org/tx/';
+
+// ============================================================
 // STATE
 // ============================================================
 let walletConnected = false;
@@ -1160,46 +1176,100 @@ function closeWallet() {
 }
 
 async function connectWallet() {
-  // Try to connect OP_NET Wallet (OPWallet Chrome Extension)
+  // ── Cek OPWallet extension ──
+  const provider = window.opnet || window.bitcoin || window.unisat;
+
+  if (!provider) {
+    showToast('⚠️', 'OPWallet Not Found', 'Please install OPWallet Chrome Extension first!');
+    setTimeout(function() {
+      window.open('https://chromewebstore.google.com/detail/opwallet/pmbjpcmaaladnfpacpmhmnfmpklgbdjb', '_blank');
+    }, 1200);
+    return;
+  }
+
   try {
-    if (typeof window.opnet !== 'undefined') {
-      // Real OPWallet integration
-      const accounts = await window.opnet.requestAccounts();
-      if (accounts && accounts.length > 0) {
-        walletAddress = accounts[0];
-        const balanceResult = await window.opnet.getBalance();
-        walletBalance = balanceResult ? (parseInt(balanceResult) / 1e8) : 0;
-        finishConnect(walletAddress, walletBalance);
-        return;
-      }
+    // ── Minta izin akses akun ──
+    let accounts = [];
+    if (typeof provider.requestAccounts === 'function') {
+      accounts = await provider.requestAccounts();
+    } else if (typeof provider.getAccounts === 'function') {
+      accounts = await provider.getAccounts();
     }
 
-    // Fallback: check window.bitcoin (some wallets expose this)
-    if (typeof window.bitcoin !== 'undefined' && window.bitcoin.requestAccounts) {
-      const accounts = await window.bitcoin.requestAccounts();
-      if (accounts && accounts.length > 0) {
-        walletAddress = accounts[0];
-        walletBalance = 0.1234;
-        finishConnect(walletAddress, walletBalance);
-        return;
-      }
+    if (!accounts || accounts.length === 0) {
+      showToast('⚠️', 'No Accounts', 'No accounts found. Please unlock OPWallet.');
+      return;
     }
 
-    // DEMO MODE: simulate wallet for testnet demo
-    simulateDemoWallet();
+    walletAddress = accounts[0];
+
+    // ── Ambil saldo tBTC ──
+    try {
+      let bal = 0;
+      if (typeof provider.getBalance === 'function') {
+        const result = await provider.getBalance();
+        if (typeof result === 'object' && result !== null) {
+          bal = (parseInt(result.confirmed || result.total || 0)) / 1e8;
+        } else {
+          bal = parseInt(result || 0) / 1e8;
+        }
+      }
+      walletBalance = bal;
+    } catch (balErr) {
+      console.warn('Balance fetch error:', balErr);
+      walletBalance = 0;
+    }
+
+    // ── Cek network — harus Testnet ──
+    try {
+      if (typeof provider.getNetwork === 'function') {
+        const network = await provider.getNetwork();
+        const networkName = (network || '').toString().toLowerCase();
+        if (networkName.includes('main') && !networkName.includes('test')) {
+          showToast('⚠️', 'Wrong Network', 'Please switch OPWallet to Testnet 3!');
+          return;
+        }
+      }
+    } catch (netErr) {
+      console.warn('Network check error:', netErr);
+    }
+
+    // ── Event listener perubahan akun & network ──
+    if (provider.on) {
+      provider.on('accountsChanged', function(newAccounts) {
+        if (!newAccounts || newAccounts.length === 0) {
+          disconnectWallet();
+        } else {
+          walletAddress = newAccounts[0];
+          document.getElementById('walletAddr').textContent = walletAddress;
+          document.getElementById('connectBtn').textContent =
+            walletAddress.slice(0, 8) + '...' + walletAddress.slice(-4);
+          showToast('🔄', 'Account Changed', walletAddress.slice(0,12) + '...');
+        }
+      });
+      provider.on('networkChanged', function(newNetwork) {
+        showToast('🌐', 'Network Changed', 'Switched to: ' + newNetwork);
+        document.getElementById('networkName').textContent = newNetwork;
+      });
+    }
+
+    finishConnect(walletAddress, walletBalance);
 
   } catch (err) {
     console.error('Wallet connection error:', err);
-    showToast('⚠️', 'Connection Failed', err.message || 'Could not connect wallet. Install OP_Wallet extension.');
+    if (err.code === 4001) {
+      showToast('❌', 'Rejected', 'You rejected the connection request.');
+    } else {
+      showToast('❌', 'Connection Failed', err.message || 'Unknown error. Try refreshing.');
+    }
   }
 }
 
 function simulateDemoWallet() {
-  // Demo mode for testing UI
-  walletAddress = 'tb1p' + Array.from({length:38}, () => '0123456789abcdef'[Math.floor(Math.random()*16)]).join('');
-  walletBalance = (Math.random() * 0.5 + 0.01).toFixed(4);
-  finishConnect(walletAddress, parseFloat(walletBalance));
-  showToast('ℹ️', 'Demo Mode', 'Install OP_Wallet Chrome extension for real testnet transactions');
+  walletAddress = 'tb1p' + Array.from({length:38}, function() { return '0123456789abcdef'[Math.floor(Math.random()*16)]; }).join('');
+  walletBalance = parseFloat((Math.random() * 0.5 + 0.01).toFixed(4));
+  finishConnect(walletAddress, walletBalance);
+  showToast('ℹ️', 'Demo Mode', 'Install OPWallet Chrome extension for real testnet transactions');
 }
 
 function finishConnect(address, balance) {
@@ -1322,34 +1392,111 @@ async function confirmTx() {
 }
 
 async function sendOpNetTransaction(type, asset, amount) {
-  // Real OP_NET transaction using window.opnet
+  const provider = window.opnet || window.bitcoin || window.unisat;
+  if (!provider) throw new Error('OPWallet not found. Please install OPWallet extension.');
+
   const satAmount = Math.floor(parseFloat(amount) * 1e8);
-  const tx = await window.opnet.sendTransaction({
-    to: '0x' + 'LENDING_PROTOCOL_CONTRACT_ADDRESS', // Replace with actual contract
+
+  // Verifikasi saldo cukup sebelum kirim
+  if (type === 'supply' && asset === 'tBTC') {
+    if (satAmount > walletBalance * 1e8) {
+      throw new Error('Insufficient tBTC balance. Get more from faucet.opnet.org');
+    }
+  }
+
+  // Buat payload transaksi untuk OP_NET
+  const txPayload = {
+    to: LENDING_CONTRACT,
     value: satAmount.toString(),
     data: encodeCalldata(type, asset, satAmount),
-    network: 'testnet'
-  });
-  return tx;
+    network: 'testnet',
+    feeRate: 10  // sat/vbyte — bisa dinaikkan untuk konfirmasi lebih cepat
+  };
+
+  let txResult;
+
+  // Coba berbagai metode sesuai versi OPWallet
+  if (typeof provider.sendBitcoin === 'function' && asset === 'tBTC') {
+    // Metode transfer BTC langsung
+    txResult = await provider.sendBitcoin(LENDING_CONTRACT, satAmount);
+
+  } else if (typeof provider.sendTransaction === 'function') {
+    // Metode kontrak OP_NET
+    txResult = await provider.sendTransaction(txPayload);
+
+  } else if (typeof provider.signAndBroadcastTransaction === 'function') {
+    txResult = await provider.signAndBroadcastTransaction(txPayload);
+
+  } else {
+    // Fallback: sign PSBT manual
+    const psbt = await buildPSBT(satAmount, type, asset);
+    const signed = await provider.signPsbt(psbt);
+    txResult = await provider.pushPsbt(signed);
+  }
+
+  // Update saldo lokal setelah transaksi
+  setTimeout(async function() {
+    try {
+      const newBal = await provider.getBalance();
+      if (typeof newBal === 'object') {
+        walletBalance = parseInt(newBal.confirmed || newBal.total || 0) / 1e8;
+      } else {
+        walletBalance = parseInt(newBal || 0) / 1e8;
+      }
+      document.getElementById('walletBal').innerHTML =
+        walletBalance.toFixed(4) + ' <span style="font-size:16px;color:var(--muted)">tBTC</span>';
+    } catch(e) { console.warn('Balance refresh failed:', e); }
+  }, 3000);
+
+  return txResult;
 }
 
-function encodeCalldata(type, asset, amount) {
-  // OP_NET calldata encoding (simplified)
-  const selector = type === 'supply' ? '0xa0712d68' : '0xd9d98ce4';
-  return selector + amount.toString(16).padStart(64, '0');
+// Encode calldata untuk smart contract OP_NET
+function encodeCalldata(type, asset, amountSats) {
+  // Selector function OP_NET contract
+  const selectors = {
+    supply: 'a0712d68',
+    borrow: 'd9d98ce4',
+    repay:  'acb70815',
+    withdraw: '2e1a7d4d'
+  };
+  const selector = selectors[type] || selectors.supply;
+  const encodedAmount = amountSats.toString(16).padStart(64, '0');
+  return '0x' + selector + encodedAmount;
+}
+
+// Build PSBT untuk fallback signing
+async function buildPSBT(satAmount, type, asset) {
+  // Placeholder — implementasi penuh butuh library bitcoin-psbt
+  // Untuk production, gunakan @btc-vision/transaction
+  return null;
 }
 
 async function simulateTransaction() {
-  await new Promise(r => setTimeout(r, 1800));
-  const fakeTxid = Array.from({length:64}, () => '0123456789abcdef'[Math.floor(Math.random()*16)]).join('');
+  await new Promise(function(r) { setTimeout(r, 1800); });
+  const fakeTxid = Array.from({length:64}, function() {
+    return '0123456789abcdef'[Math.floor(Math.random()*16)];
+  }).join('');
   handleTxSuccess({ txid: fakeTxid, status: 'confirmed' });
 }
 
 function handleTxSuccess(tx) {
-  const txid = tx.txid || tx.hash || 'demo_tx_' + Date.now();
-  showToast('✅', currentModal ? (currentModal.type === 'supply' ? 'Supplied Successfully' : 'Borrowed Successfully') : 'Transaction Sent',
-    'TxID: ' + txid.slice(0, 16) + '...'
-  );
+  const txid = tx.txid || tx.hash || tx || ('demo_tx_' + Date.now());
+  const txidStr = typeof txid === 'string' ? txid : JSON.stringify(txid);
+  const label = currentModal
+    ? (currentModal.type === 'supply' ? 'Supplied Successfully ✅' : 'Borrowed Successfully ✅')
+    : 'Transaction Sent ✅';
+
+  showToast('✅', label, 'TxID: ' + txidStr.slice(0, 20) + '...');
+
+  // Buka explorer setelah 2 detik (hanya untuk transaksi nyata)
+  if (txidStr.length === 64 && !txidStr.startsWith('demo')) {
+    setTimeout(function() {
+      if (confirm('Transaction sent! View on OP_NET Explorer?')) {
+        window.open(EXPLORER_URL + txidStr, '_blank');
+      }
+    }, 2000);
+  }
 }
 
 // ============================================================
@@ -1360,13 +1507,16 @@ const agentResponses = {
   'balance': () => walletConnected ? `💰 **Your Wallet Balance**\n\nAddress: \`${walletAddress?.slice(0,14)}...\`\n\n• **tBTC**: ${walletBalance.toFixed(4)} (≈ $${(walletBalance * 33700).toLocaleString()})\n• **USDs**: 5,000.00\n\nTo get more testnet tBTC, visit the [faucet](https://faucet.opnet.org/)` : `⚠️ Please connect your OP_NET wallet first to view your balance.`,
   'health': () => `🏥 **Health Factor Analysis**\n\nYour current health factor is **2.14** — this is considered **safe**.\n\n• Liquidation threshold: 1.0\n• Current collateral: 0.25 tBTC + 5,000 USDs\n• Current debt: 2,000 USDs\n\nYou can safely borrow up to 2,500 more USDs before entering risky territory.`,
   'strategy': () => `⚡ **Optimal tBTC Yield Strategy**\n\n**Option 1 - Simple Supply (Low Risk)**\n→ Supply tBTC at 2.84% APY\n→ Earn passive yield with no liquidation risk\n\n**Option 2 - Loop Strategy (Medium Risk)**\n→ Supply tBTC → Borrow USDs → Supply USDs\n→ Effective yield: ~3.2% net APY\n\n**Option 3 - Leverage (Higher Risk)**\n→ Supply tBTC as collateral, borrow more tBTC\n→ Up to 65% LTV — monitor health factor carefully\n\n⚠️ Always maintain health factor > 1.5`,
-  'supply': async (msg) => {
-    const match = msg.match(/(\d+\.?\d*)\s*(tbtc|usds|wbtc)/i);
+  'supply': async function(msg) {
+    var match = msg.match(/(\d+\.?\d*)\s*(tbtc|usds|wbtc)/i);
     if (match) {
-      const amt = match[1], asset = match[2].toUpperCase();
-      return `✅ **Supply Order Prepared**\n\nAsset: **${asset}**\nAmount: **${amt}**\nExpected APY: **${asset === 'tBTC' ? '2.84' : asset === 'USDs' ? '4.21' : '3.15'}%**\n\nTo execute this transaction, click the **Supply** button in the Markets tab or I can open the modal for you. ${walletConnected ? '🟢 Wallet connected' : '⚠️ Please connect wallet first'}`,
+      var amt = match[1];
+      var asset = match[2].toUpperCase();
+      var apyVal = asset === 'tBTC' ? '2.84' : asset === 'USDs' ? '4.21' : '3.15';
+      var walletStatus = walletConnected ? '🟢 Wallet connected' : '⚠️ Please connect wallet first';
+      return '✅ **Supply Order Prepared**\n\nAsset: **' + asset + '**\nAmount: **' + amt + '**\nExpected APY: **' + apyVal + '%**\n\nTo execute this transaction, click the **Supply** button in the Markets tab. ' + walletStatus;
     }
-    return `To supply assets, please specify the amount and asset. Example: "Supply 0.1 tBTC" or use the Markets tab.`;
+    return 'To supply assets, please specify the amount and asset. Example: "Supply 0.1 tBTC" or use the Markets tab.';
   },
   'default': (msg) => `I received your message: "${msg}"\n\nI'm connected to OP_NET via MCP at \`ai.opnet.org/mcp\`. I can help with:\n• Market rates and analytics\n• Position management\n• Transaction execution\n• Risk assessment\n\nWhat would you like to know?`
 };
