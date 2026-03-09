@@ -14,7 +14,7 @@
 const fs = require('fs') as typeof import('fs');
 
 // ── KONFIGURASI — EDIT BAGIAN INI ─────────────────────────────
-const PRIVATE_KEY  = 'YOUR_WIF_PRIVATE_KEY_HERE'; // ganti dengan WIF key kamu
+const PRIVATE_KEY  = 'cRc2RsERxyALi7pNMnPqcVLYXdMtVVbjWeSoG5Yt4ZQNtd1zQUuA'; // ganti dengan WIF key kamu
 const RPC_URL      = 'https://testnet.opnet.org';
 const CONTRACT_FILE = './LendingProtocol.wasm';
 // ───────────────────────────────────────────────────────────────
@@ -23,7 +23,7 @@ async function main(): Promise<void> {
   printBanner();
 
   // ── Guard: private key harus diisi ──
-  if (PRIVATE_KEY === 'YOUR_WIF_PRIVATE_KEY_HERE') {
+  if (PRIVATE_KEY === 'cRc2RsERxyALi7pNMnPqcVLYXdMtVVbjWeSoG5Yt4ZQNtd1zQUuA') {
     console.error('❌  Please set your PRIVATE_KEY in deploy.ts (line 18)');
     console.error('    Export from OPWallet → Settings → Export Private Key');
     process.exit(1);
