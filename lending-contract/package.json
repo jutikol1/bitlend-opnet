@@ -3,10 +3,11 @@
   "version": "1.0.0",
   "description": "BitLend Lending Protocol for OP_NET Testnet",
   "scripts": {
-    "build":      "npx tsc --noEmit",
-    "compile":    "npx asc LendingProtocol.ts --outFile LendingProtocol.wasm --optimize",
-    "deploy":     "npx ts-node --skip-project deploy.ts",
-    "deploy:cli": "npx opnet deploy --contract LendingProtocol.wasm --network testnet --feeRate 10"
+    "build":        "tsc --noEmit",
+    "compile":      "asc LendingProtocol.ts --outFile LendingProtocol.wasm --optimize",
+    "deploy":       "ts-node deploy.ts",
+    "deploy:cli":   "opnet deploy --contract LendingProtocol.wasm --network testnet --feeRate 10",
+    "check":        "npm run"
   },
   "dependencies": {
     "opnet":                   "latest",
@@ -15,8 +16,8 @@
   },
   "devDependencies": {
     "assemblyscript":  "latest",
-    "typescript":      "^5.0.0",
-    "ts-node":         "^10.9.0",
-    "@types/node":     "^20.0.0"
+    "typescript":      "latest",
+    "ts-node":         "latest",
+    "@types/node":     "latest"
   }
 }
