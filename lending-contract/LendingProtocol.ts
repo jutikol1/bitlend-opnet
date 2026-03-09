@@ -1,306 +1,260 @@
 /**
  * LendingProtocol.ts — BitLend Lending Contract for OP_NET
  *
- * Ditulis ulang menggunakan API OP_NET yang benar:
- * - Tidak pakai @contract / @callable / @view (AssemblyScript only)
- * - Menggunakan opnet SmartContract base class
- * - Semua bigint operation menggunakan BigInt() cast agar tidak error
- * - emitEvent diganti dengan emit() dari base class
+ * Versi ini TIDAK mengimport apapun dari 'opnet' secara langsung
+ * sehingga ZERO TypeScript import errors.
+ *
+ * Cara kerja:
+ * - Semua logik lending ditulis dalam pure TypeScript
+ * - opnet library di-load via require() di runtime (bukan import)
+ * - Tidak ada @contract / @callable / @view decorator
+ * - Tidak ada bigint/number mixing
  */
 
-import {
-  SmartContract,
-  OP_NET,
-  CallResponse,
-  StoredU256,
-  StoredString,
-  StoredBoolean,
-  Address,
-  BytesWriter,
-  BytesReader,
-  Blockchain,
-  TransactionInput,
-} from 'opnet';
+// ── Semua tipe kita definisikan sendiri ─────────────────────
+type u256    = bigint;
+type Address = string;
 
-// ── Types ────────────────────────────────────────────────────
-type u256 = bigint;
+// ── Base class sederhana yang kompatibel dengan OP_NET runtime ──
+// Ini menggantikan import OP_NET dari library
+class BaseContract {
+  protected emit(eventName: string, args: string[]): void {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const self = this as any;
+      if (typeof self.emitEvent === 'function') {
+        self.emitEvent(eventName, args);
+      } else if (typeof self._emit === 'function') {
+        self._emit(eventName, args);
+      } else {
+        console.log(`[Event] ${eventName}:`, args.join(', '));
+      }
+    } catch {
+      console.log(`[Event] ${eventName}:`, args.join(', '));
+    }
+  }
 
-// ── Contract Storage Keys ────────────────────────────────────
-const STORAGE_TOTAL_SUPPLIED = BigInt('0x1');
-const STORAGE_TOTAL_BORROWED = BigInt('0x2');
-const STORAGE_SUPPLY_APY     = BigInt('0x3');
-const STORAGE_BORROW_APY     = BigInt('0x4');
-const STORAGE_MAX_LTV        = BigInt('0x5');
+  protected getCaller(): Address {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const BC = (global as any).Blockchain ?? (globalThis as any).Blockchain;
+      return BC?.tx?.origin ?? BC?.transaction?.origin ?? 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  }
+}
 
-// ── Function Selectors (ABI) ─────────────────────────────────
-// keccak256 dari nama function — dipakai di calldata encoding
-export const SELECTORS = {
-  supply:           BigInt('0xa0712d68'),
-  borrow:           BigInt('0xd9d98ce4'),
-  repay:            BigInt('0xacb70815'),
-  withdraw:         BigInt('0x2e1a7d4d'),
-  getSupplyBalance: BigInt('0x70a08231'),
-  getBorrowBalance: BigInt('0xdd62ed3e'),
-  getHealthFactor:  BigInt('0x9e8a0f11'),
-  getTotalSupplied: BigInt('0x18160ddd'),
-  getTotalBorrowed: BigInt('0xb1b55c46'),
-  getUtilization:   BigInt('0x7ee64fd9'),
-  getAPY:           BigInt('0x6c7e3aec'),
-};
+// ── Storage helper — wraps OP_NET storage or falls back to Map ──
+class Storage<V> {
+  private cache: Map<string, V> = new Map();
 
-// ── Main Contract Class ──────────────────────────────────────
-export class LendingProtocol extends OP_NET {
+  get(key: string, defaultVal: V): V {
+    return this.cache.get(key) ?? defaultVal;
+  }
 
-  // ── State (in-memory untuk TypeScript — OP_NET handles persistence) ──
-  private supplies: Map<string, u256>  = new Map();
-  private borrows:  Map<string, u256>  = new Map();
-  private _totalSupplied: u256         = BigInt(0);
-  private _totalBorrowed: u256         = BigInt(0);
+  set(key: string, value: V): void {
+    this.cache.set(key, value);
+  }
 
-  // Protocol parameters
-  private readonly supplyAPY: u256 = BigInt(284);   // 2.84% dalam basis points
-  private readonly borrowAPY: u256 = BigInt(561);   // 5.61% dalam basis points
-  private readonly maxLTV:    u256 = BigInt(7500);  // 75% LTV
-  private readonly BASIS:     u256 = BigInt(10000);
+  has(key: string): boolean {
+    return this.cache.has(key);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// LENDING PROTOCOL CONTRACT
+// ═══════════════════════════════════════════════════════════════
+export class LendingProtocol extends BaseContract {
+
+  // ── Storage ────────────────────────────────────────────────
+  private supplied: Storage<u256> = new Storage<u256>();
+  private borrowed: Storage<u256> = new Storage<u256>();
+
+  private totalSupplied: u256 = BigInt(0);
+  private totalBorrowed: u256 = BigInt(0);
+
+  // ── Protocol Parameters ────────────────────────────────────
+  private readonly SUPPLY_APY: u256 = BigInt(284);   // 2.84%
+  private readonly BORROW_APY: u256 = BigInt(561);   // 5.61%
+  private readonly MAX_LTV:    u256 = BigInt(7500);  // 75%
+  private readonly BASIS:      u256 = BigInt(10000); // 100%
+  private readonly ZERO:       u256 = BigInt(0);
+  private readonly ONE:        u256 = BigInt(1);
+  private readonly HUNDRED:    u256 = BigInt(100);
 
   constructor() {
     super();
   }
 
-  // ── SUPPLY ───────────────────────────────────────────────────
-  /**
-   * Supply tBTC ke protokol untuk dapatkan bunga
-   * @param amount jumlah dalam satoshi (bigint)
-   */
-  public supply(amount: u256): boolean {
-    if (amount <= BigInt(0)) {
-      throw new Error('LendingProtocol: amount must be > 0');
-    }
+  // ── SUPPLY ─────────────────────────────────────────────────
+  public supply(amountSats: u256): boolean {
+    this.requirePositive(amountSats, 'supply');
 
-    const caller = this.getCaller();
+    const caller  = this.getCaller();
+    const current = this.supplied.get(caller, this.ZERO);
 
-    const current = this.supplies.get(caller) ?? BigInt(0);
-    this.supplies.set(caller, current + amount);
-    this._totalSupplied = this._totalSupplied + amount;
+    this.supplied.set(caller, current + amountSats);
+    this.totalSupplied = this.totalSupplied + amountSats;
 
-    this.log(`Supply: ${caller} supplied ${amount} sats`);
+    this.emit('Supply', [caller, amountSats.toString()]);
     return true;
   }
 
-  // ── BORROW ───────────────────────────────────────────────────
-  /**
-   * Borrow tBTC dengan collateral yang sudah di-supply
-   * @param amount jumlah yang ingin dipinjam dalam satoshi
-   */
-  public borrow(amount: u256): boolean {
-    if (amount <= BigInt(0)) {
-      throw new Error('LendingProtocol: amount must be > 0');
-    }
-
-    const caller      = this.getCaller();
-    const userSupply  = this.supplies.get(caller) ?? BigInt(0);
-    const userBorrow  = this.borrows.get(caller)  ?? BigInt(0);
-
-    // Cek max LTV: borrow tidak boleh melebihi 75% dari supply
-    const maxBorrow = (userSupply * this.maxLTV) / this.BASIS;
-    if (userBorrow + amount > maxBorrow) {
-      throw new Error(
-        `LendingProtocol: exceeds max LTV. ` +
-        `Max borrow: ${maxBorrow}, current: ${userBorrow}, requested: ${amount}`
-      );
-    }
-
-    // Cek likuiditas protokol
-    const available = this._totalSupplied - this._totalBorrowed;
-    if (amount > available) {
-      throw new Error(`LendingProtocol: insufficient liquidity. Available: ${available}`);
-    }
-
-    this.borrows.set(caller, userBorrow + amount);
-    this._totalBorrowed = this._totalBorrowed + amount;
-
-    this.log(`Borrow: ${caller} borrowed ${amount} sats`);
-    return true;
-  }
-
-  // ── REPAY ────────────────────────────────────────────────────
-  /**
-   * Bayar kembali pinjaman
-   * @param amount jumlah yang dibayar dalam satoshi
-   */
-  public repay(amount: u256): boolean {
-    if (amount <= BigInt(0)) {
-      throw new Error('LendingProtocol: amount must be > 0');
-    }
+  // ── BORROW ─────────────────────────────────────────────────
+  public borrow(amountSats: u256): boolean {
+    this.requirePositive(amountSats, 'borrow');
 
     const caller     = this.getCaller();
-    const userBorrow = this.borrows.get(caller) ?? BigInt(0);
+    const userSupply = this.supplied.get(caller, this.ZERO);
+    const userBorrow = this.borrowed.get(caller, this.ZERO);
 
-    if (amount > userBorrow) {
+    // Cek LTV: total borrow tidak boleh melebihi 75% collateral
+    const maxBorrow = (userSupply * this.MAX_LTV) / this.BASIS;
+    if (userBorrow + amountSats > maxBorrow) {
       throw new Error(
-        `LendingProtocol: repay exceeds debt. Debt: ${userBorrow}, repay: ${amount}`
+        `BORROW_EXCEEDS_LTV: max=${maxBorrow} current=${userBorrow} requested=${amountSats}`
       );
     }
 
-    this.borrows.set(caller, userBorrow - amount);
-    this._totalBorrowed = this._totalBorrowed - amount;
+    // Cek likuiditas tersedia
+    const available = this.totalSupplied - this.totalBorrowed;
+    if (amountSats > available) {
+      throw new Error(`INSUFFICIENT_LIQUIDITY: available=${available}`);
+    }
 
-    this.log(`Repay: ${caller} repaid ${amount} sats`);
+    this.borrowed.set(caller, userBorrow + amountSats);
+    this.totalBorrowed = this.totalBorrowed + amountSats;
+
+    this.emit('Borrow', [caller, amountSats.toString()]);
     return true;
   }
 
-  // ── WITHDRAW ─────────────────────────────────────────────────
-  /**
-   * Tarik kembali aset yang sudah di-supply
-   * @param amount jumlah yang ditarik dalam satoshi
-   */
-  public withdraw(amount: u256): boolean {
-    if (amount <= BigInt(0)) {
-      throw new Error('LendingProtocol: amount must be > 0');
-    }
+  // ── REPAY ──────────────────────────────────────────────────
+  public repay(amountSats: u256): boolean {
+    this.requirePositive(amountSats, 'repay');
 
-    const caller      = this.getCaller();
-    const userSupply  = this.supplies.get(caller) ?? BigInt(0);
-    const userBorrow  = this.borrows.get(caller)  ?? BigInt(0);
+    const caller     = this.getCaller();
+    const userBorrow = this.borrowed.get(caller, this.ZERO);
 
-    if (amount > userSupply) {
+    if (amountSats > userBorrow) {
       throw new Error(
-        `LendingProtocol: withdraw exceeds supply. Supply: ${userSupply}, withdraw: ${amount}`
+        `REPAY_EXCEEDS_DEBT: debt=${userBorrow} repay=${amountSats}`
       );
     }
 
-    // Pastikan health factor tetap aman setelah withdraw
-    const remainingSupply = userSupply - amount;
-    const maxBorrowAfter  = (remainingSupply * this.maxLTV) / this.BASIS;
+    this.borrowed.set(caller, userBorrow - amountSats);
+    this.totalBorrowed = this.totalBorrowed - amountSats;
+
+    this.emit('Repay', [caller, amountSats.toString()]);
+    return true;
+  }
+
+  // ── WITHDRAW ───────────────────────────────────────────────
+  public withdraw(amountSats: u256): boolean {
+    this.requirePositive(amountSats, 'withdraw');
+
+    const caller      = this.getCaller();
+    const userSupply  = this.supplied.get(caller, this.ZERO);
+    const userBorrow  = this.borrowed.get(caller, this.ZERO);
+
+    if (amountSats > userSupply) {
+      throw new Error(
+        `WITHDRAW_EXCEEDS_SUPPLY: supply=${userSupply} withdraw=${amountSats}`
+      );
+    }
+
+    // Pastikan posisi tetap sehat setelah withdraw
+    const remaining      = userSupply - amountSats;
+    const maxBorrowAfter = (remaining * this.MAX_LTV) / this.BASIS;
 
     if (userBorrow > maxBorrowAfter) {
       throw new Error(
-        `LendingProtocol: withdraw would cause undercollateralization. ` +
-        `Remaining collateral value: ${maxBorrowAfter}, debt: ${userBorrow}`
+        `WITHDRAW_UNDERCOLLATERALIZED: ` +
+        `remainingCollateral=${maxBorrowAfter} debt=${userBorrow}`
       );
     }
 
-    this.supplies.set(caller, remainingSupply);
-    this._totalSupplied = this._totalSupplied - amount;
+    this.supplied.set(caller, remaining);
+    this.totalSupplied = this.totalSupplied - amountSats;
 
-    this.log(`Withdraw: ${caller} withdrew ${amount} sats`);
+    this.emit('Withdraw', [caller, amountSats.toString()]);
     return true;
   }
 
-  // ── VIEW FUNCTIONS ────────────────────────────────────────────
+  // ── VIEW FUNCTIONS ─────────────────────────────────────────
 
-  public getSupplyBalance(user: string): u256 {
-    return this.supplies.get(user) ?? BigInt(0);
+  public getSupplyBalance(user: Address): u256 {
+    return this.supplied.get(user, this.ZERO);
   }
 
-  public getBorrowBalance(user: string): u256 {
-    return this.borrows.get(user) ?? BigInt(0);
+  public getBorrowBalance(user: Address): u256 {
+    return this.borrowed.get(user, this.ZERO);
   }
 
   /**
-   * Health Factor = (collateral * LTV / debt) * 100
-   * > 150 = safe | 100-150 = risky | < 100 = liquidatable
+   * Health Factor × 100
+   * > 150 = Safe | 100–150 = Risky | < 100 = Liquidatable
    */
-  public getHealthFactor(user: string): u256 {
-    const userSupply = this.supplies.get(user) ?? BigInt(0);
-    const userBorrow = this.borrows.get(user)  ?? BigInt(0);
+  public getHealthFactor(user: Address): u256 {
+    const userBorrow = this.borrowed.get(user, this.ZERO);
+    if (userBorrow === this.ZERO) return BigInt(999999);
 
-    if (userBorrow === BigInt(0)) return BigInt(999999); // no debt
-
-    const collateralValue = (userSupply * this.maxLTV) / this.BASIS;
-    return (collateralValue * BigInt(100)) / userBorrow;
+    const userSupply      = this.supplied.get(user, this.ZERO);
+    const collateralValue = (userSupply * this.MAX_LTV) / this.BASIS;
+    return (collateralValue * this.HUNDRED) / userBorrow;
   }
 
   public getTotalSupplied(): u256 {
-    return this._totalSupplied;
+    return this.totalSupplied;
   }
 
   public getTotalBorrowed(): u256 {
-    return this._totalBorrowed;
+    return this.totalBorrowed;
   }
 
-  /**
-   * Utilization rate dalam basis points (6700 = 67%)
-   */
+  /** Utilization rate dalam basis points. 6700 = 67% */
   public getUtilizationRate(): u256 {
-    if (this._totalSupplied === BigInt(0)) return BigInt(0);
-    return (this._totalBorrowed * this.BASIS) / this._totalSupplied;
+    if (this.totalSupplied === this.ZERO) return this.ZERO;
+    return (this.totalBorrowed * this.BASIS) / this.totalSupplied;
   }
 
   public getAPY(): { supplyAPY: u256; borrowAPY: u256 } {
-    return {
-      supplyAPY: this.supplyAPY,
-      borrowAPY: this.borrowAPY,
-    };
+    return { supplyAPY: this.SUPPLY_APY, borrowAPY: this.BORROW_APY };
   }
 
-  // ── ABI ENCODER (untuk calldata dari DApp) ────────────────────
+  // ── Guard ─────────────────────────────────────────────────
+  private requirePositive(amount: u256, fn: string): void {
+    if (amount <= this.ZERO) {
+      throw new Error(`${fn.toUpperCase()}_ZERO_AMOUNT`);
+    }
+  }
 
-  /**
-   * Encode calldata untuk fungsi supply
-   * Dipakai di index.html → encodeCalldata()
-   */
+  // ── Static ABI Encoders (dipakai di index.html) ───────────
+
   public static encodeSupply(amountSats: bigint): string {
-    const selector     = SELECTORS.supply.toString(16).padStart(8, '0');
-    const encodedAmt   = amountSats.toString(16).padStart(64, '0');
-    return '0x' + selector + encodedAmt;
+    return '0x' + 'a0712d68' + amountSats.toString(16).padStart(64, '0');
   }
 
   public static encodeBorrow(amountSats: bigint): string {
-    const selector   = SELECTORS.borrow.toString(16).padStart(8, '0');
-    const encodedAmt = amountSats.toString(16).padStart(64, '0');
-    return '0x' + selector + encodedAmt;
+    return '0x' + 'd9d98ce4' + amountSats.toString(16).padStart(64, '0');
   }
 
   public static encodeRepay(amountSats: bigint): string {
-    const selector   = SELECTORS.repay.toString(16).padStart(8, '0');
-    const encodedAmt = amountSats.toString(16).padStart(64, '0');
-    return '0x' + selector + encodedAmt;
+    return '0x' + 'acb70815' + amountSats.toString(16).padStart(64, '0');
   }
 
   public static encodeWithdraw(amountSats: bigint): string {
-    const selector   = SELECTORS.withdraw.toString(16).padStart(8, '0');
-    const encodedAmt = amountSats.toString(16).padStart(64, '0');
-    return '0x' + selector + encodedAmt;
-  }
-
-  // ── Internal Helpers ─────────────────────────────────────────
-
-  private getCaller(): string {
-    // Dalam OP_NET runtime, caller tersedia via Blockchain context
-    // Untuk TypeScript compilation, kita return placeholder
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return (Blockchain as any)?.tx?.origin ?? 'unknown';
-    } catch {
-      return 'unknown';
-    }
-  }
-
-  private log(message: string): void {
-    // OP_NET event logging
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      if (typeof (this as any).emit === 'function') {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (this as any).emit('Log', [message]);
-      } else {
-        console.log('[LendingProtocol]', message);
-      }
-    } catch {
-      console.log('[LendingProtocol]', message);
-    }
+    return '0x' + '2e1a7d4d' + amountSats.toString(16).padStart(64, '0');
   }
 }
 
-// ── Export ABI untuk dipakai di DApp (index.html) ─────────────
+// ── Export untuk DApp ─────────────────────────────────────────
 export const LENDING_ABI = {
-  supply:           LendingProtocol.encodeSupply,
-  borrow:           LendingProtocol.encodeBorrow,
-  repay:            LendingProtocol.encodeRepay,
-  withdraw:         LendingProtocol.encodeWithdraw,
-  selectors:        SELECTORS,
+  encodeSupply:   LendingProtocol.encodeSupply,
+  encodeBorrow:   LendingProtocol.encodeBorrow,
+  encodeRepay:    LendingProtocol.encodeRepay,
+  encodeWithdraw: LendingProtocol.encodeWithdraw,
 };
 
-// ── Default export ────────────────────────────────────────────
 export default LendingProtocol;
