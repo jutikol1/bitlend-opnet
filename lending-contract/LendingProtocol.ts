@@ -1,260 +1,182 @@
+// @ts-nocheck
+/* eslint-disable */
 /**
- * LendingProtocol.ts — BitLend Lending Contract for OP_NET
- *
- * Versi ini TIDAK mengimport apapun dari 'opnet' secara langsung
- * sehingga ZERO TypeScript import errors.
- *
- * Cara kerja:
- * - Semua logik lending ditulis dalam pure TypeScript
- * - opnet library di-load via require() di runtime (bukan import)
- * - Tidak ada @contract / @callable / @view decorator
- * - Tidak ada bigint/number mixing
+ * LendingProtocol.ts — AssemblyScript Contract for OP_NET
+ * 
+ * PENTING: File ini dikompilasi dengan AssemblyScript (asc), BUKAN TypeScript (tsc)
+ * VS Code errors untuk u64/bool bisa diabaikan — hanya valid saat dikompilasi dengan asc
+ * 
+ * Compile: npx asc LendingProtocol.ts --outFile LendingProtocol.wasm --optimize
  */
 
-// ── Semua tipe kita definisikan sendiri ─────────────────────
-type u256    = bigint;
-type Address = string;
+// AssemblyScript built-in types — dikenali oleh asc, bukan tsc
+// @ts-ignore
+declare type u64  = number;
+// @ts-ignore  
+declare type u32  = number;
+// @ts-ignore
+declare type bool = boolean;
 
-// ── Base class sederhana yang kompatibel dengan OP_NET runtime ──
-// Ini menggantikan import OP_NET dari library
-class BaseContract {
-  protected emit(eventName: string, args: string[]): void {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const self = this as any;
-      if (typeof self.emitEvent === 'function') {
-        self.emitEvent(eventName, args);
-      } else if (typeof self._emit === 'function') {
-        self._emit(eventName, args);
-      } else {
-        console.log(`[Event] ${eventName}:`, args.join(', '));
-      }
-    } catch {
-      console.log(`[Event] ${eventName}:`, args.join(', '));
-    }
-  }
+// ── Storage Maps ──────────────────────────────────────────────
+// @ts-ignore
+const supplied: Map<string, u64> = new Map<string, u64>();
+// @ts-ignore
+const borrowed: Map<string, u64> = new Map<string, u64>();
 
-  protected getCaller(): Address {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const BC = (global as any).Blockchain ?? (globalThis as any).Blockchain;
-      return BC?.tx?.origin ?? BC?.transaction?.origin ?? 'unknown';
-    } catch {
-      return 'unknown';
-    }
+// ── Protocol State ─────────────────────────────────────────────
+// @ts-ignore
+let totalSupplied: u64 = 0;
+// @ts-ignore
+let totalBorrowed: u64 = 0;
+
+// ── Protocol Parameters ────────────────────────────────────────
+// @ts-ignore
+const SUPPLY_APY: u64 = 284;
+// @ts-ignore
+const BORROW_APY: u64 = 561;
+// @ts-ignore
+const MAX_LTV:    u64 = 7500;
+// @ts-ignore
+const BASIS:      u64 = 10000;
+
+// ── Helper ─────────────────────────────────────────────────────
+// @ts-ignore
+function getOrDefault(map: Map<string, u64>, key: string): u64 {
+  if (map.has(key)) {
+    return map.get(key);
   }
+  return 0;
 }
 
-// ── Storage helper — wraps OP_NET storage or falls back to Map ──
-class Storage<V> {
-  private cache: Map<string, V> = new Map();
+// ══════════════════════════════════════════════════════════════
+// SUPPLY
+// ══════════════════════════════════════════════════════════════
+// @ts-ignore
+export function supply(caller: string, amountSats: u64): bool {
+  if (amountSats == 0) return false;
 
-  get(key: string, defaultVal: V): V {
-    return this.cache.get(key) ?? defaultVal;
-  }
-
-  set(key: string, value: V): void {
-    this.cache.set(key, value);
-  }
-
-  has(key: string): boolean {
-    return this.cache.has(key);
-  }
+  // @ts-ignore
+  const current: u64 = getOrDefault(supplied, caller);
+  supplied.set(caller, current + amountSats);
+  totalSupplied = totalSupplied + amountSats;
+  return true;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// LENDING PROTOCOL CONTRACT
-// ═══════════════════════════════════════════════════════════════
-export class LendingProtocol extends BaseContract {
+// ══════════════════════════════════════════════════════════════
+// BORROW
+// ══════════════════════════════════════════════════════════════
+// @ts-ignore
+export function borrow(caller: string, amountSats: u64): bool {
+  if (amountSats == 0) return false;
 
-  // ── Storage ────────────────────────────────────────────────
-  private supplied: Storage<u256> = new Storage<u256>();
-  private borrowed: Storage<u256> = new Storage<u256>();
+  // @ts-ignore
+  const userSupply: u64 = getOrDefault(supplied, caller);
+  // @ts-ignore
+  const userBorrow: u64 = getOrDefault(borrowed, caller);
+  // @ts-ignore
+  const maxBorrow:  u64 = (userSupply * MAX_LTV) / BASIS;
 
-  private totalSupplied: u256 = BigInt(0);
-  private totalBorrowed: u256 = BigInt(0);
+  if (userBorrow + amountSats > maxBorrow) return false;
 
-  // ── Protocol Parameters ────────────────────────────────────
-  private readonly SUPPLY_APY: u256 = BigInt(284);   // 2.84%
-  private readonly BORROW_APY: u256 = BigInt(561);   // 5.61%
-  private readonly MAX_LTV:    u256 = BigInt(7500);  // 75%
-  private readonly BASIS:      u256 = BigInt(10000); // 100%
-  private readonly ZERO:       u256 = BigInt(0);
-  private readonly ONE:        u256 = BigInt(1);
-  private readonly HUNDRED:    u256 = BigInt(100);
+  // @ts-ignore
+  const available: u64 = totalSupplied - totalBorrowed;
+  if (amountSats > available) return false;
 
-  constructor() {
-    super();
-  }
-
-  // ── SUPPLY ─────────────────────────────────────────────────
-  public supply(amountSats: u256): boolean {
-    this.requirePositive(amountSats, 'supply');
-
-    const caller  = this.getCaller();
-    const current = this.supplied.get(caller, this.ZERO);
-
-    this.supplied.set(caller, current + amountSats);
-    this.totalSupplied = this.totalSupplied + amountSats;
-
-    this.emit('Supply', [caller, amountSats.toString()]);
-    return true;
-  }
-
-  // ── BORROW ─────────────────────────────────────────────────
-  public borrow(amountSats: u256): boolean {
-    this.requirePositive(amountSats, 'borrow');
-
-    const caller     = this.getCaller();
-    const userSupply = this.supplied.get(caller, this.ZERO);
-    const userBorrow = this.borrowed.get(caller, this.ZERO);
-
-    // Cek LTV: total borrow tidak boleh melebihi 75% collateral
-    const maxBorrow = (userSupply * this.MAX_LTV) / this.BASIS;
-    if (userBorrow + amountSats > maxBorrow) {
-      throw new Error(
-        `BORROW_EXCEEDS_LTV: max=${maxBorrow} current=${userBorrow} requested=${amountSats}`
-      );
-    }
-
-    // Cek likuiditas tersedia
-    const available = this.totalSupplied - this.totalBorrowed;
-    if (amountSats > available) {
-      throw new Error(`INSUFFICIENT_LIQUIDITY: available=${available}`);
-    }
-
-    this.borrowed.set(caller, userBorrow + amountSats);
-    this.totalBorrowed = this.totalBorrowed + amountSats;
-
-    this.emit('Borrow', [caller, amountSats.toString()]);
-    return true;
-  }
-
-  // ── REPAY ──────────────────────────────────────────────────
-  public repay(amountSats: u256): boolean {
-    this.requirePositive(amountSats, 'repay');
-
-    const caller     = this.getCaller();
-    const userBorrow = this.borrowed.get(caller, this.ZERO);
-
-    if (amountSats > userBorrow) {
-      throw new Error(
-        `REPAY_EXCEEDS_DEBT: debt=${userBorrow} repay=${amountSats}`
-      );
-    }
-
-    this.borrowed.set(caller, userBorrow - amountSats);
-    this.totalBorrowed = this.totalBorrowed - amountSats;
-
-    this.emit('Repay', [caller, amountSats.toString()]);
-    return true;
-  }
-
-  // ── WITHDRAW ───────────────────────────────────────────────
-  public withdraw(amountSats: u256): boolean {
-    this.requirePositive(amountSats, 'withdraw');
-
-    const caller      = this.getCaller();
-    const userSupply  = this.supplied.get(caller, this.ZERO);
-    const userBorrow  = this.borrowed.get(caller, this.ZERO);
-
-    if (amountSats > userSupply) {
-      throw new Error(
-        `WITHDRAW_EXCEEDS_SUPPLY: supply=${userSupply} withdraw=${amountSats}`
-      );
-    }
-
-    // Pastikan posisi tetap sehat setelah withdraw
-    const remaining      = userSupply - amountSats;
-    const maxBorrowAfter = (remaining * this.MAX_LTV) / this.BASIS;
-
-    if (userBorrow > maxBorrowAfter) {
-      throw new Error(
-        `WITHDRAW_UNDERCOLLATERALIZED: ` +
-        `remainingCollateral=${maxBorrowAfter} debt=${userBorrow}`
-      );
-    }
-
-    this.supplied.set(caller, remaining);
-    this.totalSupplied = this.totalSupplied - amountSats;
-
-    this.emit('Withdraw', [caller, amountSats.toString()]);
-    return true;
-  }
-
-  // ── VIEW FUNCTIONS ─────────────────────────────────────────
-
-  public getSupplyBalance(user: Address): u256 {
-    return this.supplied.get(user, this.ZERO);
-  }
-
-  public getBorrowBalance(user: Address): u256 {
-    return this.borrowed.get(user, this.ZERO);
-  }
-
-  /**
-   * Health Factor × 100
-   * > 150 = Safe | 100–150 = Risky | < 100 = Liquidatable
-   */
-  public getHealthFactor(user: Address): u256 {
-    const userBorrow = this.borrowed.get(user, this.ZERO);
-    if (userBorrow === this.ZERO) return BigInt(999999);
-
-    const userSupply      = this.supplied.get(user, this.ZERO);
-    const collateralValue = (userSupply * this.MAX_LTV) / this.BASIS;
-    return (collateralValue * this.HUNDRED) / userBorrow;
-  }
-
-  public getTotalSupplied(): u256 {
-    return this.totalSupplied;
-  }
-
-  public getTotalBorrowed(): u256 {
-    return this.totalBorrowed;
-  }
-
-  /** Utilization rate dalam basis points. 6700 = 67% */
-  public getUtilizationRate(): u256 {
-    if (this.totalSupplied === this.ZERO) return this.ZERO;
-    return (this.totalBorrowed * this.BASIS) / this.totalSupplied;
-  }
-
-  public getAPY(): { supplyAPY: u256; borrowAPY: u256 } {
-    return { supplyAPY: this.SUPPLY_APY, borrowAPY: this.BORROW_APY };
-  }
-
-  // ── Guard ─────────────────────────────────────────────────
-  private requirePositive(amount: u256, fn: string): void {
-    if (amount <= this.ZERO) {
-      throw new Error(`${fn.toUpperCase()}_ZERO_AMOUNT`);
-    }
-  }
-
-  // ── Static ABI Encoders (dipakai di index.html) ───────────
-
-  public static encodeSupply(amountSats: bigint): string {
-    return '0x' + 'a0712d68' + amountSats.toString(16).padStart(64, '0');
-  }
-
-  public static encodeBorrow(amountSats: bigint): string {
-    return '0x' + 'd9d98ce4' + amountSats.toString(16).padStart(64, '0');
-  }
-
-  public static encodeRepay(amountSats: bigint): string {
-    return '0x' + 'acb70815' + amountSats.toString(16).padStart(64, '0');
-  }
-
-  public static encodeWithdraw(amountSats: bigint): string {
-    return '0x' + '2e1a7d4d' + amountSats.toString(16).padStart(64, '0');
-  }
+  borrowed.set(caller, userBorrow + amountSats);
+  totalBorrowed = totalBorrowed + amountSats;
+  return true;
 }
 
-// ── Export untuk DApp ─────────────────────────────────────────
-export const LENDING_ABI = {
-  encodeSupply:   LendingProtocol.encodeSupply,
-  encodeBorrow:   LendingProtocol.encodeBorrow,
-  encodeRepay:    LendingProtocol.encodeRepay,
-  encodeWithdraw: LendingProtocol.encodeWithdraw,
-};
+// ══════════════════════════════════════════════════════════════
+// REPAY
+// ══════════════════════════════════════════════════════════════
+// @ts-ignore
+export function repay(caller: string, amountSats: u64): bool {
+  if (amountSats == 0) return false;
 
-export default LendingProtocol;
+  // @ts-ignore
+  const userBorrow: u64 = getOrDefault(borrowed, caller);
+  if (amountSats > userBorrow) return false;
+
+  borrowed.set(caller, userBorrow - amountSats);
+  totalBorrowed = totalBorrowed - amountSats;
+  return true;
+}
+
+// ══════════════════════════════════════════════════════════════
+// WITHDRAW
+// ══════════════════════════════════════════════════════════════
+// @ts-ignore
+export function withdraw(caller: string, amountSats: u64): bool {
+  if (amountSats == 0) return false;
+
+  // @ts-ignore
+  const userSupply:      u64 = getOrDefault(supplied, caller);
+  // @ts-ignore
+  const userBorrow:      u64 = getOrDefault(borrowed, caller);
+
+  if (amountSats > userSupply) return false;
+
+  // @ts-ignore
+  const remaining:       u64 = userSupply - amountSats;
+  // @ts-ignore
+  const maxBorrowAfter:  u64 = (remaining * MAX_LTV) / BASIS;
+
+  if (userBorrow > maxBorrowAfter) return false;
+
+  supplied.set(caller, remaining);
+  totalSupplied = totalSupplied - amountSats;
+  return true;
+}
+
+// ══════════════════════════════════════════════════════════════
+// VIEW FUNCTIONS
+// ══════════════════════════════════════════════════════════════
+// @ts-ignore
+export function getSupplyBalance(user: string): u64 {
+  return getOrDefault(supplied, user);
+}
+
+// @ts-ignore
+export function getBorrowBalance(user: string): u64 {
+  return getOrDefault(borrowed, user);
+}
+
+// @ts-ignore
+export function getHealthFactor(user: string): u64 {
+  // @ts-ignore
+  const userBorrow: u64 = getOrDefault(borrowed, user);
+  if (userBorrow == 0) return 999999;
+
+  // @ts-ignore
+  const userSupply:  u64 = getOrDefault(supplied, user);
+  // @ts-ignore
+  const collateral:  u64 = (userSupply * MAX_LTV) / BASIS;
+  return (collateral * 100) / userBorrow;
+}
+
+// @ts-ignore
+export function getTotalSupplied(): u64 {
+  return totalSupplied;
+}
+
+// @ts-ignore
+export function getTotalBorrowed(): u64 {
+  return totalBorrowed;
+}
+
+// @ts-ignore
+export function getUtilizationRate(): u64 {
+  if (totalSupplied == 0) return 0;
+  return (totalBorrowed * BASIS) / totalSupplied;
+}
+
+// @ts-ignore
+export function getSupplyAPY(): u64 {
+  return SUPPLY_APY;
+}
+
+// @ts-ignore
+export function getBorrowAPY(): u64 {
+  return BORROW_APY;
+}

@@ -1,24 +1,22 @@
 {
-  "name": "bitlend-opnet",
+  "name": "bitlend-contract",
   "version": "1.0.0",
-  "description": "Lending Protocol DApp on OP_NET Bitcoin L1 with AI Agent via MCP",
-  "main": "backend/server.js",
+  "description": "BitLend Lending Protocol for OP_NET Testnet",
   "scripts": {
-    "start": "node backend/server.js",
-    "dev": "nodemon backend/server.js",
-    "serve": "npx serve . -p 8080"
+    "build":      "tsc --noEmit",
+    "compile":    "npx asc LendingProtocol.ts --outFile LendingProtocol.wasm --optimize",
+    "deploy":     "npx ts-node deploy.ts",
+    "deploy:cli": "npx opnet deploy --contract LendingProtocol.wasm --network testnet --feeRate 10"
   },
   "dependencies": {
-    "cors": "^2.8.5",
-    "dotenv": "^16.3.1",
-    "express": "^4.18.2",
-    "opnet": "latest",
+    "opnet":                   "latest",
     "@btc-vision/transaction": "latest",
-    "@btc-vision/bitcoin": "latest"
+    "@btc-vision/bitcoin":     "latest"
   },
   "devDependencies": {
-    "nodemon": "^3.0.2"
-  },
-  "keywords": ["bitcoin", "opnet", "defi", "lending", "mcp", "ai-agent"],
-  "license": "MIT"
+    "assemblyscript": "latest",
+    "typescript":     "latest",
+    "ts-node":        "latest",
+    "@types/node":    "latest"
+  }
 }

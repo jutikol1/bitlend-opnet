@@ -13,6 +13,6 @@
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true
   },
-  "include": ["*.ts"],
-  "exclude": ["node_modules", "dist"]
+  "include": ["deploy.ts"],
+  "exclude": ["node_modules", "dist", "LendingProtocol.ts"]
 }
