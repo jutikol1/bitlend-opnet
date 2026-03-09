@@ -1,21 +1,22 @@
 {
   "name": "bitlend-contract",
   "version": "1.0.0",
-  "description": "BitLend Lending Protocol Smart Contract for OP_NET",
+  "description": "BitLend Lending Protocol for OP_NET Testnet",
   "scripts": {
-    "compile": "opnet compile LendingProtocol.ts --output LendingProtocol.wasm",
-    "deploy":  "npx ts-node deploy.ts",
-    "test":    "npx ts-node test.ts"
+    "build":      "npx tsc --noEmit",
+    "compile":    "npx asc LendingProtocol.ts --outFile LendingProtocol.wasm --optimize",
+    "deploy":     "npx ts-node --skip-project deploy.ts",
+    "deploy:cli": "npx opnet deploy --contract LendingProtocol.wasm --network testnet --feeRate 10"
   },
   "dependencies": {
-    "opnet":                    "latest",
-    "@btc-vision/transaction":  "latest",
-    "@btc-vision/bitcoin":      "latest",
-    "@btc-vision/opnet":        "latest"
+    "opnet":                   "latest",
+    "@btc-vision/transaction": "latest",
+    "@btc-vision/bitcoin":     "latest"
   },
   "devDependencies": {
-    "typescript":   "^5.0.0",
-    "ts-node":      "^10.9.0",
-    "@types/node":  "^20.0.0"
+    "assemblyscript":  "latest",
+    "typescript":      "^5.0.0",
+    "ts-node":         "^10.9.0",
+    "@types/node":     "^20.0.0"
   }
 }
