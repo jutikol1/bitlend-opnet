@@ -1177,7 +1177,7 @@ function closeWallet() {
 
 async function connectWallet() {
   // ── Cek OPWallet extension ──
-  const provider = window.opnet || window.bitcoin || window.unisat;
+  let provider = window.opnet || window.bitcoin || window.unisat; console.log('provider keys in window:', Object.keys(window).filter(k => ['opnet','opwallet','OPWallet','bitcoin','unisat'].includes(k)));
 
   if (!provider) {
     showToast('⚠️', 'OPWallet Not Found', 'Please install OPWallet Chrome Extension first!');
@@ -1392,7 +1392,7 @@ async function confirmTx() {
 }
 
 async function sendOpNetTransaction(type, asset, amount) {
-  const provider = window.opnet || window.bitcoin || window.unisat;
+  let provider = window.opnet || window.bitcoin || window.unisat; console.log('provider keys in window:', Object.keys(window).filter(k => ['opnet','opwallet','OPWallet','bitcoin','unisat'].includes(k)));
   if (!provider) throw new Error('OPWallet not found. Please install OPWallet extension.');
 
   const satAmount = Math.floor(parseFloat(amount) * 1e8);
