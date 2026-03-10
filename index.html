@@ -1415,23 +1415,57 @@ async function sendOpNetTransaction(type, asset, amount) {
 
   let txResult;
 
-  // Coba berbagai metode sesuai versi OPWallet
-  if (typeof provider.sendBitcoin === 'function' && asset === 'tBTC') {
-    // Metode transfer BTC langsung
-    txResult = await provider.sendBitcoin(LENDING_CONTRACT, satAmount);
+  // Log available methods untuk debug
+  console.log('OPWallet methods:', Object.keys(provider).filter(k => typeof provider[k] === 'function').join(', '));
+
+  // OPWallet API — coba semua kemungkinan method
+  if (typeof provider.interact === 'function') {
+    // OP_NET native interact (versi terbaru OPWallet)
+    txResult = await provider.interact({
+      contract: LENDING_CONTRACT,
+      calldata: encodeCalldata(type, asset, satAmount),
+      feeRate:  10,
+      network:  'testnet',
+    });
+
+  } else if (typeof provider.call === 'function') {
+    // OP_NET call method
+    txResult = await provider.call({
+      to:       LENDING_CONTRACT,
+      data:     encodeCalldata(type, asset, satAmount),
+      value:    satAmount.toString(),
+      feeRate:  10,
+    });
+
+  } else if (typeof provider.sendOpnetTransaction === 'function') {
+    txResult = await provider.sendOpnetTransaction({
+      to:       LENDING_CONTRACT,
+      calldata: encodeCalldata(type, asset, satAmount),
+      feeRate:  10,
+    });
 
   } else if (typeof provider.sendTransaction === 'function') {
-    // Metode kontrak OP_NET
     txResult = await provider.sendTransaction(txPayload);
 
   } else if (typeof provider.signAndBroadcastTransaction === 'function') {
     txResult = await provider.signAndBroadcastTransaction(txPayload);
 
-  } else {
-    // Fallback: sign PSBT manual
+  } else if (typeof provider.sendBitcoin === 'function') {
+    txResult = await provider.sendBitcoin(LENDING_CONTRACT, satAmount);
+
+  } else if (typeof provider.signPsbt === 'function') {
     const psbt = await buildPSBT(satAmount, type, asset);
     const signed = await provider.signPsbt(psbt);
-    txResult = await provider.pushPsbt(signed);
+    txResult = typeof provider.pushPsbt === 'function'
+      ? await provider.pushPsbt(signed)
+      : signed;
+
+  } else {
+    // Tampilkan semua method yang tersedia untuk debug
+    const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(provider))
+      .concat(Object.keys(provider))
+      .filter(k => typeof provider[k] === 'function' && k !== 'constructor');
+    throw new Error('OPWallet method tidak ditemukan. Available: ' + methods.join(', '));
   }
 
   // Update saldo lokal setelah transaksi
