@@ -1143,7 +1143,7 @@
 // Alamat smart contract lending di OP_NET Testnet
 // Ganti dengan alamat kontrak kamu setelah deploy
 // Panduan deploy: lihat README.md bagian "Smart Contract"
-const LENDING_CONTRACT = 'tb1pxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx';
+const LENDING_CONTRACT = 'opt1sqr9wzntcpn26x3fg380uszv8ncczjgylds5r5244';
 
 // RPC endpoint OP_NET Testnet
 const OPNET_RPC = 'https://testnet.opnet.org';
@@ -1415,33 +1415,56 @@ async function sendOpNetTransaction(type, asset, amount) {
 
   let txResult;
 
-  const calldata = encodeCalldata(type, asset, satAmount);
+  // Log available methods untuk debug
+  console.log('OPWallet methods:', Object.keys(provider).filter(k => typeof provider[k] === 'function').join(', '));
 
-  if (typeof provider.signAndBroadcastInteraction === 'function') {
-    // OPWallet native OP_NET interaction API
-    txResult = await provider.signAndBroadcastInteraction({
-      to:       LENDING_CONTRACT,
-      calldata: calldata,
-      satsPerByte: 10,
+  // OPWallet API — coba semua kemungkinan method
+  if (typeof provider.interact === 'function') {
+    // OP_NET native interact (versi terbaru OPWallet)
+    txResult = await provider.interact({
+      contract: LENDING_CONTRACT,
+      calldata: encodeCalldata(type, asset, satAmount),
+      feeRate:  10,
+      network:  'testnet',
     });
 
-  } else if (typeof provider.signInteraction === 'function') {
-    // Sign dulu, lalu broadcast manual
-    const signed = await provider.signInteraction({
+  } else if (typeof provider.call === 'function') {
+    // OP_NET call method
+    txResult = await provider.call({
       to:       LENDING_CONTRACT,
-      calldata: calldata,
-      satsPerByte: 10,
+      data:     encodeCalldata(type, asset, satAmount),
+      value:    satAmount.toString(),
+      feeRate:  10,
     });
-    txResult = await provider.broadcast(signed);
 
-  } else if (typeof provider.deployContract === 'function') {
-    // Fallback sendTransaction
-    txResult = await provider.sendTransaction ? 
-      await provider.sendTransaction(txPayload) : 
-      await provider.pushTx({ rawtx: calldata });
+  } else if (typeof provider.sendOpnetTransaction === 'function') {
+    txResult = await provider.sendOpnetTransaction({
+      to:       LENDING_CONTRACT,
+      calldata: encodeCalldata(type, asset, satAmount),
+      feeRate:  10,
+    });
+
+  } else if (typeof provider.sendTransaction === 'function') {
+    txResult = await provider.sendTransaction(txPayload);
+
+  } else if (typeof provider.signAndBroadcastTransaction === 'function') {
+    txResult = await provider.signAndBroadcastTransaction(txPayload);
+
+  } else if (typeof provider.sendBitcoin === 'function') {
+    txResult = await provider.sendBitcoin(LENDING_CONTRACT, satAmount);
+
+  } else if (typeof provider.signPsbt === 'function') {
+    const psbt = await buildPSBT(satAmount, type, asset);
+    const signed = await provider.signPsbt(psbt);
+    txResult = typeof provider.pushPsbt === 'function'
+      ? await provider.pushPsbt(signed)
+      : signed;
 
   } else {
-    const methods = Object.keys(provider).filter(k => typeof provider[k] === 'function');
+    // Tampilkan semua method yang tersedia untuk debug
+    const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(provider))
+      .concat(Object.keys(provider))
+      .filter(k => typeof provider[k] === 'function' && k !== 'constructor');
     throw new Error('OPWallet method tidak ditemukan. Available: ' + methods.join(', '));
   }
 
