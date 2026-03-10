@@ -1374,7 +1374,7 @@ async function confirmTx() {
   btn.disabled = true;
 
   try {
-    if (typeof window.opnet !== 'undefined' && walletAddress && !walletAddress.startsWith('tb1p0')) {
+    if (typeof window.opnet !== 'undefined' && walletAddress) {
       // Real transaction via OP_NET
       const txResult = await sendOpNetTransaction(currentModal.type, currentModal.asset, amount);
       handleTxSuccess(txResult);
